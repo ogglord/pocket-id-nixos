@@ -131,6 +131,16 @@ for c in clients:
         result = request("POST", "/api/oidc/clients", payload)
         if result is None:
             die(f"Failed to create client {cid}")
+        # Generate a client secret for newly created clients
+        print("    => generating secret")
+        sec = request("POST", f"/api/oidc/clients/{cid}/secret", {})
+        if sec is not None and "secret" in sec:
+            print("\n" + "=" * 60)
+            print(f"  NEW CLIENT: {cid}")
+            print(f"  Client ID:     {cid}")
+            print(f"  Client Secret: {sec['secret']}")
+            print(f"  Issuer URL:    {BASE}/.well-known/openid-configuration")
+            print("=" * 60 + "\n")
 
     # ── User group + custom claims ──────────────────────────────
     group_name = c.get("userGroupName")
