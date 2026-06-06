@@ -5,7 +5,7 @@
 # Services declare their OIDC client requirements via
 #   services.pocket-id-auth.clients.<name> = { ... }
 #
-# A sync script runs on every deploy via postStart and creates or updates
+# A Python sync script runs on every deploy via postStart and creates or updates
 # each client idempotently using Pocket-ID's REST API (STATIC_API_KEY).
 #
 # Prerequisites:
@@ -15,125 +15,123 @@
 let
   cfg = config.services.pocket-id-auth;
 
-  # Normalise a list of URLs for the API payload (strip trailing slashes, flatten).
-  normaliseUrls = urls: map (u: lib.removeSuffix "/" u) urls;
+  # Generate a JSON config file with the client definitions.
+  # Python reads this instead of embedding shell variables.
+  clientsJson = builtins.toJSON (lib.mapAttrsToList (name: c: {
+    id = c.id;
+    name = c.name;
+    callbackURLs = map (u: lib.removeSuffix "/" u) c.redirectUris;
+    logoutCallbackURLs = map (u: lib.removeSuffix "/" u) c.logoutRedirectUris;
+    isPublic = c.isPublic;
+    pkceEnabled = c.pkceEnabled;
+    requiresReauthentication = c.requiresReauthentication;
+    requiresPushedAuthorizationRequests = c.requiresPushedAuthorizationRequests;
+    launchURL = if c.launchURL != "" then c.launchURL else null;
+  }) cfg.clients);
 
-  # Build an idempotent sync script that:
-  #   1. Fetches existing OIDC clients from Pocket-ID
-  #   2. Creates any that don't exist
-  #   3. Updates any that do
+  pruneList = builtins.attrNames cfg.clients;
 
-  syncScript = pkgs.writeShellScriptBin "pocket-id-declarative-sync" ''
-    set -euo pipefail
-    export PATH="${pkgs.curl}/bin:${pkgs.jq}/bin:$PATH"
+  syncScript = pkgs.writeTextFile {
+    name = "pocket-id-declarative-sync";
+    executable = true;
+    text = ''
+      #!${pkgs.python3}/bin/python3
+      """Sync Pocket-ID OIDC clients declared in NixOS config."""
 
-    # ── Config ────────────────────────────────────────────────────────────
-      BASE="${cfg.baseUrl}"
-      KEY_FILE="${cfg.staticApiKeyFile}"
+      import json
+      import os
+      import sys
+      import time
+      import urllib.error
+      import urllib.request
 
-      if [ ! -f "$KEY_FILE" ]; then
-        echo "pocket-id-declarative: STATIC_API_KEY file not found at $KEY_FILE" >&2
-        exit 1
-      fi
-      KEY=$(cat "$KEY_FILE")
+      BASE = "${cfg.baseUrl}"
+      KEY_FILE = "${cfg.staticApiKeyFile}"
+      CLIENTS = '''${clientsJson}'''
+      PRUNE = ${lib.boolToString cfg.prune}
+      PRUNE_LIST = ${builtins.toJSON pruneList}
 
+      def die(msg):
+          print(f"ERROR: {msg}", file=sys.stderr)
+          sys.exit(1)
+
+      def request(method, path, data=None):
+          url = BASE + path
+          headers = {"X-API-Key": open(KEY_FILE).read().strip()}
+          if data is not None:
+              headers["Content-Type"] = "application/json"
+              body = json.dumps(data).encode()
+          else:
+              body = None
+          req = urllib.request.Request(url, data=body, headers=headers, method=method)
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read().decode())
+          except urllib.error.HTTPError as e:
+              print(f"ERROR: {method} {path} returned {e.code}", file=sys.stderr)
+              print(e.read().decode(), file=sys.stderr)
+              return None
+
+      def fetch_all(path):
+          page = 1
+          total_pages = 1
+          result = []
+          while page <= total_pages:
+              resp = request("GET", f"{path}?pagination[page]={page}&pagination[limit]=100")
+              if resp is None:
+                  die(f"Failed to GET {path}")
+              result.extend(resp.get("data", []))
+              total_pages = resp.get("pagination", {}).get("totalPages", 1)
+              page += 1
+          return result
+
+      # ── Main ─────────────────────────────────────────────────────────
       # Wait for Pocket-ID to be ready
-      for i in $(seq 1 30); do
-        if curl -sf -o /dev/null "$BASE/healthz" 2>/dev/null; then break; fi
-        sleep 1
-      done
+      for _ in range(30):
+          try:
+              url = BASE + "/healthz"
+              with urllib.request.urlopen(url, timeout=2) as resp:
+                  if resp.status == 204:
+                      break
+          except Exception:
+              pass
+          time.sleep(1)
 
-      die() { echo "ERROR: $*" >&2; exit 1; }
+      clients = json.loads(CLIENTS)
+      print("pocket-id-declarative: Syncing OIDC clients...")
 
-      api() {
-        local method=$1 path=$2 data=''${3:-}
-        shift 2
-        if [ -n "$data" ]; then
-          curl -sf -X "$method" "$BASE$path" \
-            -H "X-API-Key: $KEY" \
-            -H "Content-Type: application/json" \
-            -d "$data"
-        else
-          curl -sf -X "$method" "$BASE$path" \
-            -H "X-API-Key: $KEY"
-        fi
-      }
+      existing = fetch_all("/api/oidc/clients")
+      existing_by_id = {c["id"]: c for c in existing}
 
-      # ── Helper: fetch all pages of a paginated endpoint ──────────────────
-      fetch_all() {
-        local path=$1
-        local page=1
-        local total_pages=1
-        local result="[]"
-        while [ "$page" -le "$total_pages" ]; do
-          local resp
-          resp=$(api GET "$path?pagination[page]=$page&pagination[limit]=100") || die "Failed to GET $path"
-          local data
-          data=$(echo "$resp" | jq '.data // []')
-          total_pages=$(echo "$resp" | jq '.pagination.totalPages // 1')
-          result=$(echo "$result" "$data" | jq -s 'add')
-          page=$((page + 1))
-        done
-        echo "$result"
-      }
+      for c in clients:
+          id_ = c["id"]
+          name = c.get("name", id_)
+          print(f"  client: {id_} ({name})")
 
-      # ── Sync OIDC clients ─────────────────────────────────────────────────
-      echo "pocket-id-declarative: Syncing OIDC clients..."
+          if id_ in existing_by_id:
+              print("    → updating")
+              result = request("PUT", f"/api/oidc/clients/{id_}", c)
+              if result is None:
+                  die(f"Failed to update client {id_}")
+          else:
+              print("    → creating")
+              result = request("POST", "/api/oidc/clients", c)
+              if result is None:
+                  die(f"Failed to create client {id_}")
 
-      EXISTING=$(fetch_all "/api/oidc/clients" 2>/tmp/pocket-oidc-error.txt || {
-        echo "Failed to fetch existing clients (status code unknown). Response body:" >&2
-        cat /tmp/pocket-oidc-error.txt >&2 2>/dev/null || true
-        die "Failed to fetch existing clients"
-      })
+      # Prune undeclared clients
+      if PRUNE:
+          print("pocket-id-declarative: Pruning undeclared clients...")
+          for c in existing:
+              if c["id"] not in PRUNE_LIST:
+                  print(f"  pruning: {c['id']}")
+                  result = request("DELETE", f"/api/oidc/clients/{c['id']}")
+                  if result is None:
+                      print(f"    warning: failed to delete {c['id']}", file=sys.stderr)
 
-      ${lib.concatStringsSep "\n" (lib.mapAttrsToList (clientName: client: let
-        c = client;
-        # Build the API payload
-        payload = builtins.toJSON {
-          id = c.id;
-          name = c.name;
-          callbackURLs = normaliseUrls c.redirectUris;
-          logoutCallbackURLs = normaliseUrls c.logoutRedirectUris;
-          isPublic = c.isPublic;
-          pkceEnabled = c.pkceEnabled;
-          requiresReauthentication = c.requiresReauthentication;
-          requiresPushedAuthorizationRequests = c.requiresPushedAuthorizationRequests;
-          launchURL = if c.launchURL != "" then c.launchURL else null;
-          isGroupRestricted = false;
-        };
-        escapedPayload = lib.escapeShellArg payload;
-      in ''
-        echo "  client: ${lib.escapeShellArg c.id} (${lib.escapeShellArg c.name})"
-
-        ID=${lib.escapeShellArg c.id}
-        EXISTS=$(echo "$EXISTING" | jq -r '.[] | select(.id == $id) | .id // empty' --arg id "$ID")
-
-        if [ -z "$EXISTS" ]; then
-          echo "    → creating"
-          api POST "/api/oidc/clients" ${escapedPayload} >/dev/null || die "Failed to create client ${c.id}"
-        else
-          echo "    → updating"
-          api PUT "/api/oidc/clients/$EXISTS" ${escapedPayload} >/dev/null || die "Failed to update client ${c.id}"
-        fi
-      '') cfg.clients)}
-
-      # ── Delete clients not in config (cleanup) ────────────────────────────
-      if ${lib.boolToString cfg.prune}; then
-        echo "pocket-id-declarative: Pruning undeclared clients..."
-        DECLARED_IDS=" ${lib.concatStringsSep " " (lib.attrValues (lib.mapAttrs (n: c: c.id) cfg.clients))} "
-        echo "$EXISTING" | jq -r '.[].id' | while read -r id; do
-          case "$DECLARED_IDS" in
-            *" $id "*) ;;
-            *)
-              echo "  pruning: $id"
-              api DELETE "/api/oidc/clients/$id" >/dev/null || echo "    warning: failed to delete $id" >&2
-              ;;
-          esac
-        done
-      fi
-
-      echo "pocket-id-declarative: Sync complete"
+      print("pocket-id-declarative: Sync complete")
     '';
+  };
 in
 {
   options.services.pocket-id-auth = {
