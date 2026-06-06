@@ -31,12 +31,10 @@ let
 
   pruneList = builtins.attrNames cfg.clients;
 
-  syncScript = pkgs.writeTextFile {
-    name = "pocket-id-declarative-sync";
-    executable = true;
-    text = ''
-      #!${pkgs.python3}/bin/python3
-      """Sync Pocket-ID OIDC clients declared in NixOS config."""
+  syncScript = pkgs.writeShellScriptBin "pocket-id-declarative-sync" ''
+    exec ${pkgs.python3}/bin/python3 -c '
+      # 2026-06-06: Rewritten as embedded Python to avoid shellcheck, bash escaping,
+      # and Nix indented-string gotchas. See git log for the bash version history.
 
       import json
       import os
@@ -66,7 +64,8 @@ let
           req = urllib.request.Request(url, data=body, headers=headers, method=method)
           try:
               with urllib.request.urlopen(req) as resp:
-                  return json.loads(resp.read().decode())
+                  body = resp.read()
+                  return json.loads(body.decode()) if body else {}
           except urllib.error.HTTPError as e:
               print(f"ERROR: {method} {path} returned {e.code}", file=sys.stderr)
               print(e.read().decode(), file=sys.stderr)
@@ -85,8 +84,7 @@ let
               page += 1
           return result
 
-      # ── Main ─────────────────────────────────────────────────────────
-      # Wait for Pocket-ID to be ready
+      # ── Wait for Pocket-ID ──────────────────────────────────────────
       for _ in range(30):
           try:
               url = BASE + "/healthz"
@@ -130,8 +128,8 @@ let
                       print(f"    warning: failed to delete {c['id']}", file=sys.stderr)
 
       print("pocket-id-declarative: Sync complete")
-    '';
-  };
+    '
+  '';
 in
 {
   options.services.pocket-id-auth = {
