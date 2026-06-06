@@ -38,7 +38,7 @@ import urllib.request
 BASE = "${cfg.baseUrl}"
 KEY_FILE = "${cfg.staticApiKeyFile}"
 CLIENTS_FILE = "${clientsFile}"
-PRUNE = ${lib.boolToString cfg.prune}
+PRUNE = ${if cfg.prune then "True" else "False"}
 PRUNE_LIST = ${builtins.toJSON (lib.attrNames cfg.clients)}
 
 def die(msg):
