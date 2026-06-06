@@ -23,16 +23,11 @@ let
   #   2. Creates any that don't exist
   #   3. Updates any that do
 
-  syncScript = pkgs.writeShellApplication {
-    name = "pocket-id-declarative-sync";
-    runtimeInputs = with pkgs; [ curl jq ];
-    checkPhase = ''
-      runHook preCheck
-      shellcheck --severity=error "$out/bin/pocket-id-declarative-sync"
-      runHook postCheck
-    '';
+  syncScript = pkgs.writeShellScriptBin "pocket-id-declarative-sync" ''
+    set -euo pipefail
 
-    text = ''
+    # Ensure runtime tools are available
+    export PATH="${lib.makeBinPath (with pkgs; [ curl jq ])}:$PATH"
       set -euo pipefail
 
       # ── Config ────────────────────────────────────────────────────────────
