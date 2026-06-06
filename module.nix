@@ -26,6 +26,11 @@ let
   syncScript = pkgs.writeShellApplication {
     name = "pocket-id-declarative-sync";
     runtimeInputs = with pkgs; [ curl jq ];
+    checkPhase = ''
+      runHook preCheck
+      shellcheck --severity=error "$out/bin/pocket-id-declarative-sync"
+      runHook postCheck
+    '';
 
     text = ''
       set -euo pipefail
