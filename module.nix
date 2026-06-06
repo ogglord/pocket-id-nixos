@@ -112,12 +112,14 @@ for c in clients:
     name = c.get("name", cid)
     print(f"  client: {cid} ({name})")
 
-    # Build payload (strip internal fields)
+    # Build payload (strip internal fields; force isGroupRestricted when customClaims exist)
     payload = {k: v for k, v in c.items() if k in (
         "id", "name", "callbackURLs", "logoutCallbackURLs",
         "isPublic", "pkceEnabled", "requiresReauthentication",
         "requiresPushedAuthorizationRequests", "launchURL"
     )}
+    if c.get("userGroupName"):
+        payload["isGroupRestricted"] = True
 
     if cid in existing_by_id:
         print("    => updating")
