@@ -1,34 +1,12 @@
-{ config, pkgs, lib, ... }:
-
-# Declarative Pocket-ID OIDC client configuration.
-#
-# Services declare their OIDC client requirements via
-#   services.pocket-id-auth.clients.<name> = { ... }
-#
-# A sync script runs on every deploy via postStart and creates or updates
-# each client idempotently using Pocket-ID's REST API (STATIC_API_KEY).
-#
-# Prerequisites:
-#   - A running Pocket-ID instance (services.pocket-id.enable or equivalent)
-#   - STATIC_API_KEY set in Pocket-ID and accessible via staticApiKeyFile
-
-let
-  cfg = config.services.pocket-id-auth;
-
-  # Normalise a list of URLs for the API payload (strip trailing slashes, flatten).
-  normaliseUrls = urls: map (u: lib.removeSuffix "/" u) urls;
-
-  # Build an idempotent sync script that:
-  #   1. Fetches existing OIDC clients from Pocket-ID
-  #   2. Creates any that don't exist
-  #   3. Updates any that do
-
-  syncScript = pkgs.writeShellScriptBin "pocket-id-declarative-sync" ''
-    set -euo pipefail
-
-    # Ensure runtime tools are available
-    export PATH="${lib.makeBinPath (with pkgs; [ curl jq ])}:$PATH"
+  syncScript = pkgs.writeTextFile {
+    name = "pocket-id-declarative-sync";
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
       set -euo pipefail
+
+      # Ensure runtime tools are available
+      export PATH="${pkgs.curl}/bin:${pkgs.jq}/bin:$PATH"
 
       # ── Config ────────────────────────────────────────────────────────────
       BASE="${cfg.baseUrl}"
@@ -73,6 +51,7 @@ let
           resp=$(api GET "$path?pagination[page]=$page&pagination[limit]=100") || die "Failed to GET $path"
           local data
           data=$(echo "$resp" | jq '.data // []')
+          local total_pages
           total_pages=$(echo "$resp" | jq '.pagination.totalPages // 1')
           result=$(echo "$result" "$data" | jq -s 'add')
           page=$((page + 1))
@@ -87,7 +66,6 @@ let
 
       ${lib.concatStringsSep "\n" (lib.mapAttrsToList (clientName: client: let
         c = client;
-        # Build the API payload
         payload = builtins.toJSON {
           id = c.id;
           name = c.name;
@@ -100,7 +78,6 @@ let
           launchURL = if c.launchURL != "" then c.launchURL else null;
           isGroupRestricted = false;
         };
-        escapedPayload = lib.escapeShellArg payload;
       in ''
         echo "  client: ${lib.escapeShellArg c.id} (${lib.escapeShellArg c.name})"
 
@@ -109,10 +86,10 @@ let
 
         if [ -z "$EXISTS" ]; then
           echo "    → creating"
-          api POST "/api/oidc/clients" '${escapedPayload}' >/dev/null || die "Failed to create client ${c.id}"
+          api POST "/api/oidc/clients" '${lib.escapeShellArg payload}' >/dev/null || die "Failed to create client ${c.id}"
         else
           echo "    → updating"
-          api PUT "/api/oidc/clients/$EXISTS" '${escapedPayload}' >/dev/null || die "Failed to update client ${c.id}"
+          api PUT "/api/oidc/clients/$EXISTS" '${lib.escapeShellArg payload}' >/dev/null || die "Failed to update client ${c.id}"
         fi
       '') cfg.clients)}
 
@@ -134,112 +111,3 @@ let
       echo "pocket-id-declarative: Sync complete"
     '';
   };
-in
-{
-  options.services.pocket-id-auth = {
-    enable = lib.mkEnableOption "declarative Pocket-ID OIDC client sync";
-
-    baseUrl = lib.mkOption {
-      type = lib.types.str;
-      default = "http://127.0.0.1:1411";
-      description = "Pocket-ID internal base URL for API calls.";
-    };
-
-    staticApiKeyFile = lib.mkOption {
-      type = lib.types.path;
-      description = ''
-        Path to a file containing the STATIC_API_KEY.
-        Typically a sops-decrypted secret path like /run/secrets/pocket-id/STATIC_API_KEY.
-      '';
-    };
-
-    prune = lib.mkOption {
-      type = lib.types.bool;
-      default = false;
-      description = "Delete Pocket-ID clients that are not declared in the config.";
-    };
-
-    clients = lib.mkOption {
-      description = "OIDC clients to create/update in Pocket-ID.";
-      default = { };
-      type = lib.types.attrsOf (lib.types.submodule {
-        options = {
-          id = lib.mkOption {
-            type = lib.types.str;
-            example = "sonarr";
-            description = "OIDC client ID. Short, kebab-case identifier. Also used as the unique key for API operations.";
-          };
-
-          name = lib.mkOption {
-            type = lib.types.str;
-            example = "Sonarr";
-            description = "Human-readable display name shown in Pocket-ID and on the consent screen.";
-          };
-
-          redirectUris = lib.mkOption {
-            type = lib.types.listOf lib.types.str;
-            default = [ ];
-            example = [ "https://sonarr.cignl.cc/oauth/callback" ];
-            description = "OIDC callback/redirect URIs. Supports wildcards (e.g. https://*.cignl.cc/*).";
-          };
-
-          logoutRedirectUris = lib.mkOption {
-            type = lib.types.listOf lib.types.str;
-            default = [ ];
-            example = [ "https://sonarr.cignl.cc/logout" ];
-            description = "Post-logout redirect URIs.";
-          };
-
-          isPublic = lib.mkOption {
-            type = lib.types.bool;
-            default = false;
-            description = "Whether the client is public (no client secret). Forces PKCE to be enabled.";
-          };
-
-          pkceEnabled = lib.mkOption {
-            type = lib.types.bool;
-            default = true;
-            description = "Require PKCE (Proof Key for Code Exchange) for this client.";
-          };
-
-          requiresReauthentication = lib.mkOption {
-            type = lib.types.bool;
-            default = false;
-            description = "Require the user to re-authenticate each time they use this client.";
-          };
-
-          requiresPushedAuthorizationRequests = lib.mkOption {
-            type = lib.types.bool;
-            default = false;
-            description = "Require pushed authorization requests (PAR).";
-          };
-
-          launchURL = lib.mkOption {
-            type = lib.types.str;
-            default = "";
-            example = "https://sonarr.cignl.cc";
-            description = "Launch URL for the application (shown in Pocket-ID).";
-          };
-        };
-      });
-    };
-  };
-
-  config = lib.mkIf cfg.enable {
-    # Hook the sync script into Pocket-ID's postStart so it runs after every
-    # service restart (which happens on every nh os switch).
-    systemd.services.pocket-id = lib.mkIf config.services.pocket-id.enable {
-      postStart = lib.mkAfter ''
-        ${lib.getExe syncScript} 2>&1 | logger -t pocket-id-declarative
-      '';
-    };
-
-    # Also run on activation if pocket-id is already running (e.g. initial
-    # enable where postStart doesn't fire because the service doesn't restart).
-    system.activationScripts.pocket-id-declarative = lib.mkIf config.services.pocket-id.enable ''
-      if systemctl is-active --quiet pocket-id.service 2>/dev/null; then
-        ${lib.getExe syncScript} 2>&1 | logger -t pocket-id-declarative
-      fi
-    '';
-  };
-}
