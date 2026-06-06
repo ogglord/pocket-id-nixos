@@ -227,15 +227,14 @@ in
     # service restart (which happens on every nh os switch).
     systemd.services.pocket-id = lib.mkIf config.services.pocket-id.enable {
       postStart = lib.mkAfter ''
-        ${lib.getExe syncScript} 2>&1 | logger -t pocket-id-declarative
+        ${lib.getExe syncScript}
       '';
     };
 
-    # Also run on activation if pocket-id is already running (e.g. initial
-    # enable where postStart doesn't fire because the service doesn't restart).
+    # Also run on activation if pocket-id is already running.
     system.activationScripts.pocket-id-declarative = lib.mkIf config.services.pocket-id.enable ''
       if systemctl is-active --quiet pocket-id.service 2>/dev/null; then
-        ${lib.getExe syncScript} 2>&1 | logger -t pocket-id-declarative
+        ${lib.getExe syncScript}
       fi
     '';
   };
