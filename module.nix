@@ -46,7 +46,7 @@ let
       die() { echo "ERROR: $*" >&2; exit 1; }
 
       api() {
-        local method=$1 path=$2 data=${3:-}
+        local method=$1 path=$2 data=''${3:-}
         shift 2
         if [ -n "$data" ]; then
           curl -sf -X "$method" "$BASE$path" \
