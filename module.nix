@@ -7,16 +7,11 @@
 #
 # A Python sync script runs on every deploy via postStart and creates or updates
 # each client idempotently using Pocket-ID's REST API (STATIC_API_KEY).
-#
-# Prerequisites:
-#   - A running Pocket-ID instance (services.pocket-id.enable or equivalent)
-#   - STATIC_API_KEY set in Pocket-ID and accessible via staticApiKeyFile
 
 let
   cfg = config.services.pocket-id-auth;
 
-  # Generate a JSON config file with the client definitions.
-  # Python reads this instead of embedding shell variables.
+  # JSON config with client definitions, written as a separate store path.
   clientsJson = builtins.toJSON (lib.mapAttrsToList (name: c: {
     id = c.id;
     name = c.name;
@@ -29,13 +24,10 @@ let
     launchURL = if c.launchURL != "" then c.launchURL else null;
   }) cfg.clients);
 
-  pruneList = builtins.attrNames cfg.clients;
+  clientsFile = pkgs.writeText "pocket-id-clients.json" clientsJson;
 
-  syncScript = pkgs.writeShellScriptBin "pocket-id-declarative-sync" ''
-    exec ${pkgs.python3}/bin/python3 << 'PYEOF'
-# 2026-06-06: Rewritten as embedded Python to avoid shellcheck, bash escaping,
-# and Nix indented-string gotchas. See git log for the bash version history.
-
+  # Python sync script, also in its own store path (no indented-string quoting issues).
+  syncPy = pkgs.writeText "pocket-id-declarative-sync.py" ''
 import json
 import os
 import sys
@@ -45,9 +37,9 @@ import urllib.request
 
 BASE = "${cfg.baseUrl}"
 KEY_FILE = "${cfg.staticApiKeyFile}"
-CLIENTS = '''${clientsJson}'''
+CLIENTS_FILE = "${clientsFile}"
 PRUNE = ${lib.boolToString cfg.prune}
-PRUNE_LIST = ${builtins.toJSON pruneList}
+PRUNE_LIST = ${builtins.toJSON (lib.attrNames cfg.clients)}
 
 def die(msg):
     print(f"ERROR: {msg}", file=sys.stderr)
@@ -84,7 +76,6 @@ def fetch_all(path):
         page += 1
     return result
 
-# ── Wait for Pocket-ID ──────────────────────────────────────────
 for _ in range(30):
     try:
         url = BASE + "/healthz"
@@ -95,7 +86,7 @@ for _ in range(30):
         pass
     time.sleep(1)
 
-clients = json.loads(CLIENTS)
+clients = json.load(open(CLIENTS_FILE))
 print("pocket-id-declarative: Syncing OIDC clients...")
 
 existing = fetch_all("/api/oidc/clients")
@@ -105,19 +96,17 @@ for c in clients:
     id_ = c["id"]
     name = c.get("name", id_)
     print(f"  client: {id_} ({name})")
-
     if id_ in existing_by_id:
-        print("    → updating")
+        print("    => updating")
         result = request("PUT", f"/api/oidc/clients/{id_}", c)
         if result is None:
             die(f"Failed to update client {id_}")
     else:
-        print("    → creating")
+        print("    => creating")
         result = request("POST", "/api/oidc/clients", c)
         if result is None:
             die(f"Failed to create client {id_}")
 
-# Prune undeclared clients
 if PRUNE:
     print("pocket-id-declarative: Pruning undeclared clients...")
     for c in existing:
@@ -128,7 +117,11 @@ if PRUNE:
                 print(f"    warning: failed to delete {c['id']}", file=sys.stderr)
 
 print("pocket-id-declarative: Sync complete")
-PYEOF
+  '';
+
+  # Shell wrapper that launches the Python script.
+  syncScript = pkgs.writeShellScriptBin "pocket-id-declarative-sync" ''
+    exec ${pkgs.python3}/bin/python3 ${syncPy}
   '';
 in
 {
@@ -222,15 +215,12 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # Hook the sync script into Pocket-ID's postStart so it runs after every
-    # service restart (which happens on every nh os switch).
     systemd.services.pocket-id = lib.mkIf config.services.pocket-id.enable {
       postStart = lib.mkAfter ''
         ${lib.getExe syncScript} || echo "pocket-id-declarative: sync failed (non-fatal)" >&2
       '';
     };
 
-    # Also run on activation if pocket-id is already running.
     system.activationScripts.pocket-id-declarative = lib.mkIf config.services.pocket-id.enable ''
       if systemctl is-active --quiet pocket-id.service 2>/dev/null; then
         ${lib.getExe syncScript}
