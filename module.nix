@@ -46,14 +46,13 @@ let
       die() { echo "ERROR: $*" >&2; exit 1; }
 
       api() {
-        local method=$1 path=$2
+        local method=$1 path=$2 data=$3
         shift 2
         if [ "$method" = "POST" ] || [ "$method" = "PUT" ]; then
-          # Read payload from stdin
           curl -sf -X "$method" "$BASE$path" \
             -H "X-API-Key: $KEY" \
             -H "Content-Type: application/json" \
-            -d @-
+            -d "$data"
         else
           curl -sf -X "$method" "$BASE$path" \
             -H "X-API-Key: $KEY"
