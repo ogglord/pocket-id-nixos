@@ -114,7 +114,7 @@ let
           echo "    → updating"
           api PUT "/api/oidc/clients/$EXISTS" '${escapedPayload}' >/dev/null || die "Failed to update client ${c.id}"
         fi
-      '') cfg.clients}
+      '') cfg.clients)}
 
       # ── Delete clients not in config (cleanup) ────────────────────────────
       if ${lib.boolToString cfg.prune}; then
