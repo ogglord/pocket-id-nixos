@@ -46,9 +46,9 @@ let
       die() { echo "ERROR: $*" >&2; exit 1; }
 
       api() {
-        local method=$1 path=$2 data=$3
+        local method=$1 path=$2 data=${3:-}
         shift 2
-        if [ "$method" = "POST" ] || [ "$method" = "PUT" ]; then
+        if [ -n "$data" ]; then
           curl -sf -X "$method" "$BASE$path" \
             -H "X-API-Key: $KEY" \
             -H "Content-Type: application/json" \
@@ -110,10 +110,10 @@ let
 
         if [ -z "$EXISTS" ]; then
           echo "    → creating"
-          api POST "/api/oidc/clients" '${escapedPayload}' >/dev/null || die "Failed to create client ${c.id}"
+          api POST "/api/oidc/clients" ${escapedPayload} >/dev/null || die "Failed to create client ${c.id}"
         else
           echo "    → updating"
-          api PUT "/api/oidc/clients/$EXISTS" '${escapedPayload}' >/dev/null || die "Failed to update client ${c.id}"
+          api PUT "/api/oidc/clients/$EXISTS" ${escapedPayload} >/dev/null || die "Failed to update client ${c.id}"
         fi
       '') cfg.clients)}
 
