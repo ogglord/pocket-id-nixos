@@ -102,6 +102,7 @@ Existing clients are updated in-place without regenerating their secrets.
 | `staticApiKeyFile` | path | — | File containing the STATIC_API_KEY |
 | `prune` | bool | `false` | Delete clients not declared in the config |
 | `clients.*` | submodule | — | OIDC client definitions |
+| `appConfig` | attrs of string | `{}` | App config values applied via API (SMTP, email, etc.) |
 
 ### Client options
 
@@ -147,6 +148,29 @@ You can add users to the group through the Pocket-ID web UI under **User Groups*
 
 When `prune = true`, clients that exist in Pocket-ID but are not declared in
 your NixOS config are automatically deleted. Use with care.
+
+## Application Configuration
+
+You can manage Pocket-ID app settings (SMTP, email, etc.) declaratively:
+
+```nix
+services.pocket-id-auth.appConfig = {
+  smtpHost = "127.0.0.1";
+  smtpPort = "587";
+  smtpFrom = "homelab@example.com";
+  smtpTls = "starttls";
+  smtpSkipCertVerify = "false";
+  emailVerificationEnabled = "true";
+};
+```
+
+Settings are applied idempotently on every sync — only updated when values
+differ from the current state. Only the keys you specify are enforced;
+other keys (e.g. app name, LDAP config) are left as-is.
+
+See the
+[AppConfigUpdateDto](https://github.com/pocket-id/pocket-id/blob/main/backend/internal/dto/app_config_dto.go)
+for all available keys (SMTP, LDAP, email, UI config, etc.).
 
 ## How it works
 

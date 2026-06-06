@@ -34,6 +34,11 @@ let
 
   clientsFile = pkgs.writeText "pocket-id-clients.json" clientsJson;
 
+  # App config settings (SMTP, etc.) that should be applied idempotently.
+  appConfigJson = builtins.toJSON cfg.appConfig;
+
+  appConfigFile = pkgs.writeText "pocket-id-app-config.json" appConfigJson;
+
   # Python sync script, also in its own store path (no indented-string quoting issues).
   syncPy = pkgs.writeText "pocket-id-declarative-sync.py" ''
 import json
@@ -46,6 +51,7 @@ import urllib.request
 BASE = "${cfg.baseUrl}"
 KEY_FILE = "${cfg.staticApiKeyFile}"
 CLIENTS_FILE = "${clientsFile}"
+APP_CONFIG_FILE = "${appConfigFile}"
 PRUNE = ${if cfg.prune then "True" else "False"}
 PRUNE_LIST = ${builtins.toJSON (lib.attrNames cfg.clients)}
 
@@ -188,6 +194,23 @@ if PRUNE:
                 print(f"    warning: failed to delete {c['id']}", file=sys.stderr)
 
 print("pocket-id-declarative: Sync complete")
+
+# ── App config (SMTP, etc.) ──────────────────────────────────────
+desired = json.load(open(APP_CONFIG_FILE))
+if desired:
+    print("pocket-id-declarative: Syncing app config...")
+    req = request("GET", "/api/application-configuration/all")
+    if req is not None:
+        current = {c["key"]: c["value"] for c in req}
+        merged = {**current, **desired}
+        dirty = any(desired.get(k) != current.get(k) for k in desired)
+        if dirty:
+            print("  updating settings:", list(desired.keys()))
+            r = request("PUT", "/api/application-configuration", merged)
+            if r is not None:
+                print("  app config updated")
+        else:
+            print("  app config up to date")
   '';
 
   # Shell wrapper that launches the Python script.
@@ -292,6 +315,24 @@ in
           };
         };
       });
+    };
+
+    appConfig = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = { };
+      example = {
+        smtpHost = "127.0.0.1";
+        smtpPort = "587";
+        smtpTls = "starttls";
+        smtpFrom = "homelab@example.com";
+      };
+      description = ''
+        Application configuration values to apply idempotently via the
+        Pocket-ID API (PUT /api/application-configuration).
+        Only specified keys are enforced; existing values for other keys
+        are preserved.
+        Useful for SMTP, email settings, and other app-wide config.
+      '';
     };
   };
 
