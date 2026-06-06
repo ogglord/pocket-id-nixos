@@ -155,7 +155,7 @@ for c in clients:
 
         # Link group → client
         print("    linking group to client")
-        r = request("PUT", f"/api/oidc/clients/{cid}/allowed-user-groups", [gid])
+        r = request("PUT", f"/api/oidc/clients/{cid}/allowed-user-groups", {"userGroupIds": [gid]})
         if r is None:
             die(f"Failed to link group {group_name} to client {cid}")
 
