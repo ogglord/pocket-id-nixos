@@ -23,14 +23,11 @@ let
   #   2. Creates any that don't exist
   #   3. Updates any that do
 
-  syncScript = pkgs.writeShellApplication {
-    name = "pocket-id-declarative-sync";
-    runtimeInputs = with pkgs; [ curl jq ];
+  syncScript = pkgs.writeShellScriptBin "pocket-id-declarative-sync" ''
+    set -euo pipefail
+    export PATH="${pkgs.curl}/bin:${pkgs.jq}/bin:$PATH"
 
-    text = ''
-      set -euo pipefail
-
-      # ── Config ────────────────────────────────────────────────────────────
+    # ── Config ────────────────────────────────────────────────────────────
       BASE="${cfg.baseUrl}"
       KEY_FILE="${cfg.staticApiKeyFile}"
 
@@ -49,13 +46,14 @@ let
       die() { echo "ERROR: $*" >&2; exit 1; }
 
       api() {
-        local method=$1 path=$2 data=$3
+        local method=$1 path=$2
         shift 2
-        if [ -n "$data" ]; then
+        if [ "$method" = "POST" ] || [ "$method" = "PUT" ]; then
+          # Read payload from stdin
           curl -sf -X "$method" "$BASE$path" \
             -H "X-API-Key: $KEY" \
             -H "Content-Type: application/json" \
-            -d "$data"
+            -d @-
         else
           curl -sf -X "$method" "$BASE$path" \
             -H "X-API-Key: $KEY"
@@ -133,7 +131,6 @@ let
 
       echo "pocket-id-declarative: Sync complete"
     '';
-  };
 in
 {
   options.services.pocket-id-auth = {
