@@ -32,103 +32,103 @@ let
   pruneList = builtins.attrNames cfg.clients;
 
   syncScript = pkgs.writeShellScriptBin "pocket-id-declarative-sync" ''
-    exec ${pkgs.python3}/bin/python3 -c '
-      # 2026-06-06: Rewritten as embedded Python to avoid shellcheck, bash escaping,
-      # and Nix indented-string gotchas. See git log for the bash version history.
+    exec ${pkgs.python3}/bin/python3 << 'PYEOF'
+# 2026-06-06: Rewritten as embedded Python to avoid shellcheck, bash escaping,
+# and Nix indented-string gotchas. See git log for the bash version history.
 
-      import json
-      import os
-      import sys
-      import time
-      import urllib.error
-      import urllib.request
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
 
-      BASE = "${cfg.baseUrl}"
-      KEY_FILE = "${cfg.staticApiKeyFile}"
-      CLIENTS = '''${clientsJson}'''
-      PRUNE = ${lib.boolToString cfg.prune}
-      PRUNE_LIST = ${builtins.toJSON pruneList}
+BASE = "${cfg.baseUrl}"
+KEY_FILE = "${cfg.staticApiKeyFile}"
+CLIENTS = '''${clientsJson}'''
+PRUNE = ${lib.boolToString cfg.prune}
+PRUNE_LIST = ${builtins.toJSON pruneList}
 
-      def die(msg):
-          print(f"ERROR: {msg}", file=sys.stderr)
-          sys.exit(1)
+def die(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
 
-      def request(method, path, data=None):
-          url = BASE + path
-          headers = {"X-API-Key": open(KEY_FILE).read().strip()}
-          if data is not None:
-              headers["Content-Type"] = "application/json"
-              body = json.dumps(data).encode()
-          else:
-              body = None
-          req = urllib.request.Request(url, data=body, headers=headers, method=method)
-          try:
-              with urllib.request.urlopen(req) as resp:
-                  body = resp.read()
-                  return json.loads(body.decode()) if body else {}
-          except urllib.error.HTTPError as e:
-              print(f"ERROR: {method} {path} returned {e.code}", file=sys.stderr)
-              print(e.read().decode(), file=sys.stderr)
-              return None
+def request(method, path, data=None):
+    url = BASE + path
+    headers = {"X-API-Key": open(KEY_FILE).read().strip()}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(data).encode()
+    else:
+        body = None
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read()
+            return json.loads(body.decode()) if body else {}
+    except urllib.error.HTTPError as e:
+        print(f"ERROR: {method} {path} returned {e.code}", file=sys.stderr)
+        print(e.read().decode(), file=sys.stderr)
+        return None
 
-      def fetch_all(path):
-          page = 1
-          total_pages = 1
-          result = []
-          while page <= total_pages:
-              resp = request("GET", f"{path}?pagination[page]={page}&pagination[limit]=100")
-              if resp is None:
-                  die(f"Failed to GET {path}")
-              result.extend(resp.get("data", []))
-              total_pages = resp.get("pagination", {}).get("totalPages", 1)
-              page += 1
-          return result
+def fetch_all(path):
+    page = 1
+    total_pages = 1
+    result = []
+    while page <= total_pages:
+        resp = request("GET", f"{path}?pagination[page]={page}&pagination[limit]=100")
+        if resp is None:
+            die(f"Failed to GET {path}")
+        result.extend(resp.get("data", []))
+        total_pages = resp.get("pagination", {}).get("totalPages", 1)
+        page += 1
+    return result
 
-      # ── Wait for Pocket-ID ──────────────────────────────────────────
-      for _ in range(30):
-          try:
-              url = BASE + "/healthz"
-              with urllib.request.urlopen(url, timeout=2) as resp:
-                  if resp.status == 204:
-                      break
-          except Exception:
-              pass
-          time.sleep(1)
+# ── Wait for Pocket-ID ──────────────────────────────────────────
+for _ in range(30):
+    try:
+        url = BASE + "/healthz"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            if resp.status == 204:
+                break
+    except Exception:
+        pass
+    time.sleep(1)
 
-      clients = json.loads(CLIENTS)
-      print("pocket-id-declarative: Syncing OIDC clients...")
+clients = json.loads(CLIENTS)
+print("pocket-id-declarative: Syncing OIDC clients...")
 
-      existing = fetch_all("/api/oidc/clients")
-      existing_by_id = {c["id"]: c for c in existing}
+existing = fetch_all("/api/oidc/clients")
+existing_by_id = {c["id"]: c for c in existing}
 
-      for c in clients:
-          id_ = c["id"]
-          name = c.get("name", id_)
-          print(f"  client: {id_} ({name})")
+for c in clients:
+    id_ = c["id"]
+    name = c.get("name", id_)
+    print(f"  client: {id_} ({name})")
 
-          if id_ in existing_by_id:
-              print("    → updating")
-              result = request("PUT", f"/api/oidc/clients/{id_}", c)
-              if result is None:
-                  die(f"Failed to update client {id_}")
-          else:
-              print("    → creating")
-              result = request("POST", "/api/oidc/clients", c)
-              if result is None:
-                  die(f"Failed to create client {id_}")
+    if id_ in existing_by_id:
+        print("    → updating")
+        result = request("PUT", f"/api/oidc/clients/{id_}", c)
+        if result is None:
+            die(f"Failed to update client {id_}")
+    else:
+        print("    → creating")
+        result = request("POST", "/api/oidc/clients", c)
+        if result is None:
+            die(f"Failed to create client {id_}")
 
-      # Prune undeclared clients
-      if PRUNE:
-          print("pocket-id-declarative: Pruning undeclared clients...")
-          for c in existing:
-              if c["id"] not in PRUNE_LIST:
-                  print(f"  pruning: {c['id']}")
-                  result = request("DELETE", f"/api/oidc/clients/{c['id']}")
-                  if result is None:
-                      print(f"    warning: failed to delete {c['id']}", file=sys.stderr)
+# Prune undeclared clients
+if PRUNE:
+    print("pocket-id-declarative: Pruning undeclared clients...")
+    for c in existing:
+        if c["id"] not in PRUNE_LIST:
+            print(f"  pruning: {c['id']}")
+            result = request("DELETE", f"/api/oidc/clients/{c['id']}")
+            if result is None:
+                print(f"    warning: failed to delete {c['id']}", file=sys.stderr)
 
-      print("pocket-id-declarative: Sync complete")
-    '
+print("pocket-id-declarative: Sync complete")
+PYEOF
   '';
 in
 {
