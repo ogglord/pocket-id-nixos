@@ -140,7 +140,7 @@ for c in clients:
             print(f"    group: {group_name} (exists)")
         else:
             print(f"    group: {group_name} (creating)")
-            g = request("POST", "/api/user-groups", {"name": group_name})
+            g = request("POST", "/api/user-groups", {"name": group_name, "friendlyName": group_name})
             if g is None:
                 die(f"Failed to create group {group_name}")
             gid = g["id"]
