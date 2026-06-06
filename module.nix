@@ -81,7 +81,11 @@ let
       # ── Sync OIDC clients ─────────────────────────────────────────────────
       echo "pocket-id-declarative: Syncing OIDC clients..."
 
-      EXISTING=$(fetch_all "/api/oidc/clients") || die "Failed to fetch existing clients"
+      EXISTING=$(fetch_all "/api/oidc/clients" 2>/tmp/pocket-oidc-error.txt || {
+        echo "Failed to fetch existing clients (status code unknown). Response body:" >&2
+        cat /tmp/pocket-oidc-error.txt >&2 2>/dev/null || true
+        die "Failed to fetch existing clients"
+      })
 
       ${lib.concatStringsSep "\n" (lib.mapAttrsToList (clientName: client: let
         c = client;
@@ -227,7 +231,7 @@ in
     # service restart (which happens on every nh os switch).
     systemd.services.pocket-id = lib.mkIf config.services.pocket-id.enable {
       postStart = lib.mkAfter ''
-        ${lib.getExe syncScript}
+        ${lib.getExe syncScript} || echo "pocket-id-declarative: sync failed (non-fatal)" >&2
       '';
     };
 
