@@ -85,7 +85,7 @@ let
 
       EXISTING=$(fetch_all "/api/oidc/clients") || die "Failed to fetch existing clients"
 
-      ${lib.concatMapStringsSep "\n" (clientName: client: let
+      ${lib.concatStringsSep "\n" (lib.mapAttrsToList (clientName: client: let
         c = client;
         # Build the API payload
         payload = builtins.toJSON {
