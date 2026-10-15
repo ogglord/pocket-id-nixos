@@ -69,8 +69,9 @@ Generate the keys with `openssl rand -base64 32`.
 ## Behaviour
 
 - **When it runs:** `pocket-id-declarative-sync.service` (oneshot) runs after
-  every Pocket-ID start and on every switch that changes the declared config.
-  A failed sync fails the unit.
+  every Pocket-ID start and on every switch that adds or changes it. It never
+  starts Pocket-ID; while Pocket-ID is stopped it is skipped. A failed sync
+  fails the unit.
 - **Clients** are created if missing and updated in place otherwise. With
   `prune = true`, undeclared clients are deleted.
 - **Secrets:** with `secretFile`, that secret becomes the client's only valid

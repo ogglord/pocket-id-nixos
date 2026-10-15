@@ -216,15 +216,20 @@ in
 
     systemd.services.pocket-id-declarative-sync = {
       description = "Sync declared OIDC clients into Pocket-ID";
-      # Runs after every Pocket-ID start (wantedBy + partOf) and, as its unit
-      # changes with the declared config, on every switch that changes it.
-      wantedBy = [ "pocket-id.service" ];
+      # Runs after every Pocket-ID start (wanted by it), and on every switch
+      # that adds or changes it (wanted by multi-user.target). It never starts
+      # Pocket-ID itself: while Pocket-ID is not running it is skipped, not
+      # failed, and runs when Pocket-ID next starts.
+      wantedBy = [
+        "multi-user.target"
+        "pocket-id.service"
+      ];
       partOf = [ "pocket-id.service" ];
-      requires = [ "pocket-id.service" ];
       after = [ "pocket-id.service" ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        ExecCondition = "${pkgs.systemd}/bin/systemctl is-active --quiet pocket-id.service";
         ExecStart = "${lib.getExe pkgs.python3} ${./sync.py} ${syncConfig}";
         LoadCredential = [
           "api-key:${cfg.staticApiKeyFile}"

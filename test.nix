@@ -113,6 +113,14 @@
           ok, out = token_ok("grafana-declared-secret-1")
           assert not ok, out
 
+      with subtest("with Pocket-ID stopped the sync is skipped, not failed"):
+          machine.succeed("systemctl stop pocket-id.service")
+          machine.succeed("systemctl start pocket-id-declarative-sync.service")
+          machine.fail("systemctl is-failed --quiet pocket-id-declarative-sync.service")
+          machine.fail("systemctl is-active --quiet pocket-id.service")
+          machine.succeed("systemctl start pocket-id.service")
+          machine.wait_for_unit("pocket-id-declarative-sync.service")
+
       with subtest("restarting Pocket-ID re-runs the sync"):
           machine.succeed("systemctl restart pocket-id.service")
           machine.wait_for_unit("pocket-id-declarative-sync.service")
