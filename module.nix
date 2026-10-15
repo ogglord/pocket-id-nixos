@@ -18,6 +18,10 @@ let
   cfg = config.services.pocket-id-auth;
   pocketId = config.services.pocket-id;
 
+  # 2.14.0: multiple client secrets (/api/oidc/clients/<id>/secrets), which
+  # the sync uses; STATIC_API_KEY has existed since 2.2.0.
+  minVersion = "2.14.0";
+
   # Clients as Pocket-ID's API wants them; custom claims ride on an
   # auto-created user group the client is restricted to.
   clientDefs = lib.mapAttrsToList (
@@ -199,6 +203,10 @@ in
       {
         assertion = pocketId.enable;
         message = "services.pocket-id-auth needs services.pocket-id.enable = true.";
+      }
+      {
+        assertion = lib.versionAtLeast (lib.getVersion pocketId.package) minVersion;
+        message = "services.pocket-id-auth needs Pocket-ID >= ${minVersion}; services.pocket-id.package is ${lib.getVersion pocketId.package}.";
       }
       {
         assertion = lib.all (c: !(c.isPublic && c.secretFile != null)) (lib.attrValues cfg.clients);

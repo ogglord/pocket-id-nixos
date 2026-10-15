@@ -20,6 +20,8 @@ service reads, so nothing is copied by hand.
 
 ## Usage
 
+Requires Pocket-ID **2.14.0** or newer (checked at build time).
+
 ```nix
 # flake.nix
 inputs.pocket-id-nixos.url = "github:ogglord/pocket-id-nixos";
