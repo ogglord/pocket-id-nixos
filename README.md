@@ -20,7 +20,7 @@ service reads, so nothing is copied by hand.
 
 ## Usage
 
-Requires Pocket-ID **2.14.0** or newer (checked at build time).
+Requires **NixOS 26.05** or newer (Pocket-ID 2.14.0+, checked at build time).
 
 ```nix
 # flake.nix
