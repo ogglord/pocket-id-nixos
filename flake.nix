@@ -1,22 +1,39 @@
 {
-  description = "Declarative OIDC client configuration for Pocket-ID";
+  description = "Declarative OIDC clients and app config for Pocket-ID (NixOS module)";
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  };
+  # nixpkgs is only used for this repo's checks and dev shell; the module
+  # itself uses the importing system's pkgs. Consumers should add
+  #   pocket-id-nixos.inputs.nixpkgs.follows = "nixpkgs";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs =
     { self, nixpkgs }:
     let
-      forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
-      nixosModules.default = import ./module.nix;
+      nixosModules = {
+        pocket-id-auth = ./module.nix;
+        default = self.nixosModules.pocket-id-auth;
+      };
 
-      # Dev shell for testing the sync script locally
-      devShells = forAllSystems (system: {
-        default = nixpkgs.legacyPackages.${system}.mkShell {
-          packages = with nixpkgs.legacyPackages.${system}; [ curl jq ];
+      checks = forAllSystems (pkgs: {
+        vm = pkgs.testers.runNixOSTest (import ./test.nix { inherit self; });
+      });
+
+      formatter = forAllSystems (pkgs: pkgs.nixfmt-tree);
+
+      devShells = forAllSystems (pkgs: {
+        default = pkgs.mkShell {
+          packages = with pkgs; [
+            curl
+            jq
+            python3
+          ];
         };
       });
     };

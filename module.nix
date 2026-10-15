@@ -1,222 +1,54 @@
-{ config, pkgs, lib, ... }:
+{
+  config,
+  pkgs,
+  lib,
+  ...
+}:
 
-# Declarative Pocket-ID OIDC client configuration.
+# Declarative Pocket-ID OIDC clients and app config.
 #
-# Services declare their OIDC client requirements via
+# Clients are declared as
 #   services.pocket-id-auth.clients.<name> = { ... }
-#
-# A Python sync script runs on every deploy via postStart and creates or updates
-# each client idempotently using Pocket-ID's REST API (STATIC_API_KEY).
+# and synced into Pocket-ID by `pocket-id-declarative-sync.service`
+# (sync.py, Pocket-ID's REST API authenticated with its STATIC_API_KEY).
+# The sync runs whenever Pocket-ID starts and whenever the declared config
+# changes; it creates or updates each client idempotently.
 
 let
   cfg = config.services.pocket-id-auth;
+  pocketId = config.services.pocket-id;
 
-  # JSON config: clients + their custom claims / user groups.
-  clientDefs = lib.mapAttrsToList (name: c: let
-    hasClaims = c.customClaims != {};
-    groupName = "${c.id}-users";
-  in {
-    id = c.id;
-    name = c.name;
-    callbackURLs = map (u: lib.removeSuffix "/" u) c.redirectUris;
-    logoutCallbackURLs = map (u: lib.removeSuffix "/" u) c.logoutRedirectUris;
-    isPublic = c.isPublic;
-    pkceEnabled = c.pkceEnabled;
-    requiresReauthentication = c.requiresReauthentication;
-    requiresPushedAuthorizationRequests = c.requiresPushedAuthorizationRequests;
-    launchURL = if c.launchURL != "" then c.launchURL else null;
-    # Custom claims → auto-create a user group for this client.
-    customClaims = if hasClaims then c.customClaims else {};
-    userGroupName = if hasClaims then groupName else null;
-  }) cfg.clients;
+  # Clients as Pocket-ID's API wants them; custom claims ride on an
+  # auto-created user group the client is restricted to.
+  clientDefs = lib.mapAttrsToList (
+    _: c:
+    let
+      hasClaims = c.customClaims != { };
+    in
+    {
+      inherit (c)
+        id
+        name
+        isPublic
+        pkceEnabled
+        requiresReauthentication
+        requiresPushedAuthorizationRequests
+        ;
+      callbackURLs = map (lib.removeSuffix "/") c.redirectUris;
+      logoutCallbackURLs = map (lib.removeSuffix "/") c.logoutRedirectUris;
+      launchURL = if c.launchURL != "" then c.launchURL else null;
+      customClaims = if hasClaims then c.customClaims else { };
+      userGroupName = if hasClaims then "${c.id}-users" else null;
+      secretCredential = if c.secretFile != null then "client-${c.id}" else null;
+    }
+  ) cfg.clients;
 
-  clientsJson = builtins.toJSON clientDefs;
-
-  clientsFile = pkgs.writeText "pocket-id-clients.json" clientsJson;
-
-  # App config settings (SMTP, etc.) that should be applied idempotently.
-  appConfigJson = builtins.toJSON cfg.appConfig;
-
-  appConfigFile = pkgs.writeText "pocket-id-app-config.json" appConfigJson;
-
-  # Python sync script, also in its own store path (no indented-string quoting issues).
-  syncPy = pkgs.writeText "pocket-id-declarative-sync.py" ''
-import json
-import os
-import sys
-import time
-import urllib.error
-import urllib.request
-
-BASE = "${cfg.baseUrl}"
-KEY_FILE = "${cfg.staticApiKeyFile}"
-CLIENTS_FILE = "${clientsFile}"
-APP_CONFIG_FILE = "${appConfigFile}"
-PRUNE = ${if cfg.prune then "True" else "False"}
-PRUNE_LIST = ${builtins.toJSON (lib.attrNames cfg.clients)}
-
-def die(msg):
-    print(f"ERROR: {msg}", file=sys.stderr)
-    sys.exit(1)
-
-def headers():
-    return {"X-API-Key": open(KEY_FILE).read().strip()}
-
-def request(method, path, data=None):
-    url = BASE + path
-    h = headers()
-    if data is not None:
-        h["Content-Type"] = "application/json"
-        body = json.dumps(data).encode()
-    else:
-        body = None
-    req = urllib.request.Request(url, data=body, headers=h, method=method)
-    try:
-        with urllib.request.urlopen(req) as resp:
-            body = resp.read()
-            return json.loads(body.decode()) if body else {}
-    except urllib.error.HTTPError as e:
-        print(f"ERROR: {method} {path} returned {e.code}", file=sys.stderr)
-        print(e.read().decode(), file=sys.stderr)
-        return None
-
-def fetch_all(path):
-    page = 1
-    total_pages = 1
-    result = []
-    while page <= total_pages:
-        resp = request("GET", f"{path}?pagination[page]={page}&pagination[limit]=100")
-        if resp is None:
-            die(f"Failed to GET {path}")
-        result.extend(resp.get("data", []))
-        total_pages = resp.get("pagination", {}).get("totalPages", 1)
-        page += 1
-    return result
-
-# ── Wait for Pocket-ID ──────────────────────────────────────────
-for _ in range(30):
-    try:
-        url = BASE + "/healthz"
-        with urllib.request.urlopen(url, timeout=2) as resp:
-            if resp.status == 204:
-                break
-    except Exception:
-        pass
-    time.sleep(1)
-
-clients = json.load(open(CLIENTS_FILE))
-print("pocket-id-declarative: Syncing OIDC clients...")
-
-existing_clients = fetch_all("/api/oidc/clients")
-existing_by_id = {c["id"]: c for c in existing_clients}
-existing_groups = fetch_all("/api/user-groups")
-groups_by_name = {g["name"]: g for g in existing_groups}
-
-# ── Sync OIDC clients ───────────────────────────────────────────
-for c in clients:
-    cid = c["id"]
-    name = c.get("name", cid)
-    print(f"  client: {cid} ({name})")
-
-    # Build payload (strip internal fields; force isGroupRestricted when customClaims exist)
-    payload = {k: v for k, v in c.items() if k in (
-        "id", "name", "callbackURLs", "logoutCallbackURLs",
-        "isPublic", "pkceEnabled", "requiresReauthentication",
-        "requiresPushedAuthorizationRequests", "launchURL"
-    )}
-    if c.get("userGroupName"):
-        payload["isGroupRestricted"] = True
-
-    if cid in existing_by_id:
-        print("    => updating")
-        result = request("PUT", f"/api/oidc/clients/{cid}", payload)
-        if result is None:
-            die(f"Failed to update client {cid}")
-    else:
-        print("    => creating")
-        result = request("POST", "/api/oidc/clients", payload)
-        if result is None:
-            die(f"Failed to create client {cid}")
-        # Generate a client secret for newly created clients
-        print("    => generating secret")
-        sec = request("POST", f"/api/oidc/clients/{cid}/secret", {})
-        if sec is not None and "secret" in sec:
-            print("\n" + "=" * 60)
-            print(f"  NEW CLIENT: {cid}")
-            print(f"  Client ID:     {cid}")
-            print(f"  Client Secret: {sec['secret']}")
-            print(f"  Issuer URL:    {BASE}/.well-known/openid-configuration")
-            print("=" * 60 + "\n")
-
-    # ── User group + custom claims ──────────────────────────────
-    group_name = c.get("userGroupName")
-    custom_claims = c.get("customClaims", {})
-    if group_name and custom_claims:
-        # Create / get group
-        if group_name in groups_by_name:
-            gid = groups_by_name[group_name]["id"]
-            print(f"    group: {group_name} (exists)")
-        else:
-            print(f"    group: {group_name} (creating)")
-            g = request("POST", "/api/user-groups", {"name": group_name, "friendlyName": group_name})
-            if g is None:
-                die(f"Failed to create group {group_name}")
-            gid = g["id"]
-            existing_groups.append(g)
-
-        # Set custom claims on the group
-        claims_payload = [{"key": k, "value": v} for k, v in custom_claims.items()]
-        print(f"    claims: {[k for k in custom_claims]}")
-        r = request("PUT", f"/api/custom-claims/user-group/{gid}", claims_payload)
-        if r is None:
-            die(f"Failed to set custom claims for group {group_name}")
-
-        # Link group → client
-        print("    linking group to client")
-        r = request("PUT", f"/api/oidc/clients/{cid}/allowed-user-groups", {"userGroupIds": [gid]})
-        if r is None:
-            die(f"Failed to link group {group_name} to client {cid}")
-
-        # Link client → group (bidirectional)
-        r = request("PUT", f"/api/user-groups/{gid}/allowed-oidc-clients",
-                     {"oidcClientIds": [cid]})
-        if r is None:
-            die(f"Failed to link client {cid} to group {group_name}")
-
-# ── Prune undeclared clients ────────────────────────────────────
-if PRUNE:
-    print("pocket-id-declarative: Pruning undeclared clients...")
-    for c in existing_clients:
-        if c["id"] not in PRUNE_LIST:
-            print(f"  pruning: {c['id']}")
-            result = request("DELETE", f"/api/oidc/clients/{c['id']}")
-            if result is None:
-                print(f"    warning: failed to delete {c['id']}", file=sys.stderr)
-
-print("pocket-id-declarative: Sync complete")
-
-# ── App config (SMTP, etc.) ──────────────────────────────────────
-desired = json.load(open(APP_CONFIG_FILE))
-if desired:
-    print("pocket-id-declarative: Syncing app config...")
-    req = request("GET", "/api/application-configuration/all")
-    if req is not None:
-        current = {c["key"]: c["value"] for c in req}
-        merged = {**current, **desired}
-        dirty = any(desired.get(k) != current.get(k) for k in desired)
-        if dirty:
-            print("  updating settings:", list(desired.keys()))
-            r = request("PUT", "/api/application-configuration", merged)
-            if r is not None:
-                print("  app config updated")
-        else:
-            print("  app config up to date")
-  '';
-
-  # Shell wrapper that launches the Python script.
-  syncScript = pkgs.writeShellScriptBin "pocket-id-declarative-sync" ''
-    exec ${pkgs.python3}/bin/python3 ${syncPy}
-  '';
+  syncConfig = pkgs.writeText "pocket-id-declarative.json" (
+    builtins.toJSON {
+      inherit (cfg) baseUrl appConfig prune;
+      clients = clientDefs;
+    }
+  );
 in
 {
   options.services.pocket-id-auth = {
@@ -224,15 +56,19 @@ in
 
     baseUrl = lib.mkOption {
       type = lib.types.str;
-      default = "http://127.0.0.1:1411";
-      description = "Pocket-ID internal base URL for API calls.";
+      default = "http://127.0.0.1:${toString (pocketId.settings.PORT or 1411)}";
+      defaultText = lib.literalExpression ''"http://127.0.0.1:''${toString (config.services.pocket-id.settings.PORT or 1411)}"'';
+      description = "Pocket-ID base URL the sync talks to (its local listener).";
     };
 
     staticApiKeyFile = lib.mkOption {
-      type = lib.types.path;
+      type = lib.types.nullOr lib.types.path;
+      default = pocketId.credentials.STATIC_API_KEY or null;
+      defaultText = lib.literalExpression "config.services.pocket-id.credentials.STATIC_API_KEY or null";
       description = ''
-        Path to a file containing the STATIC_API_KEY.
-        Typically a sops-decrypted secret path like /run/secrets/pocket-id/STATIC_API_KEY.
+        File containing Pocket-ID's STATIC_API_KEY. Defaults to the file given
+        to Pocket-ID itself via `services.pocket-id.credentials.STATIC_API_KEY`,
+        so the key is declared once.
       '';
     };
 
@@ -245,76 +81,99 @@ in
     clients = lib.mkOption {
       description = "OIDC clients to create/update in Pocket-ID.";
       default = { };
-      type = lib.types.attrsOf (lib.types.submodule {
-        options = {
-          id = lib.mkOption {
-            type = lib.types.str;
-            example = "sonarr";
-            description = "OIDC client ID. Short, kebab-case identifier. Also used as the unique key for API operations.";
-          };
+      type = lib.types.attrsOf (
+        lib.types.submodule (
+          { name, ... }:
+          {
+            options = {
+              id = lib.mkOption {
+                type = lib.types.str;
+                default = name;
+                defaultText = lib.literalExpression "<name>";
+                example = "sonarr";
+                description = "OIDC client ID. Short, kebab-case identifier. Also used as the unique key for API operations.";
+              };
 
-          name = lib.mkOption {
-            type = lib.types.str;
-            example = "Sonarr";
-            description = "Human-readable display name shown in Pocket-ID and on the consent screen.";
-          };
+              name = lib.mkOption {
+                type = lib.types.str;
+                example = "Sonarr";
+                description = "Human-readable display name shown in Pocket-ID and on the consent screen.";
+              };
 
-          redirectUris = lib.mkOption {
-            type = lib.types.listOf lib.types.str;
-            default = [ ];
-            example = [ "https://sonarr.cignl.cc/oauth/callback" ];
-            description = "OIDC callback/redirect URIs. Supports wildcards (e.g. https://*.cignl.cc/*).";
-          };
+              redirectUris = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [ ];
+                example = [ "https://sonarr.example.com/oauth/callback" ];
+                description = "OIDC callback/redirect URIs. Supports wildcards (e.g. https://*.example.com/*).";
+              };
 
-          logoutRedirectUris = lib.mkOption {
-            type = lib.types.listOf lib.types.str;
-            default = [ ];
-            example = [ "https://sonarr.cignl.cc/logout" ];
-            description = "Post-logout redirect URIs.";
-          };
+              logoutRedirectUris = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [ ];
+                example = [ "https://sonarr.example.com/logout" ];
+                description = "Post-logout redirect URIs.";
+              };
 
-          isPublic = lib.mkOption {
-            type = lib.types.bool;
-            default = false;
-            description = "Whether the client is public (no client secret). Forces PKCE to be enabled.";
-          };
+              isPublic = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = "Whether the client is public (no client secret). Forces PKCE to be enabled.";
+              };
 
-          pkceEnabled = lib.mkOption {
-            type = lib.types.bool;
-            default = true;
-            description = "Require PKCE (Proof Key for Code Exchange) for this client.";
-          };
+              pkceEnabled = lib.mkOption {
+                type = lib.types.bool;
+                default = true;
+                description = "Require PKCE (Proof Key for Code Exchange) for this client.";
+              };
 
-          requiresReauthentication = lib.mkOption {
-            type = lib.types.bool;
-            default = false;
-            description = "Require the user to re-authenticate each time they use this client.";
-          };
+              requiresReauthentication = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = "Require the user to re-authenticate each time they use this client.";
+              };
 
-          requiresPushedAuthorizationRequests = lib.mkOption {
-            type = lib.types.bool;
-            default = false;
-            description = "Require pushed authorization requests (PAR).";
-          };
+              requiresPushedAuthorizationRequests = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = "Require pushed authorization requests (PAR).";
+              };
 
-          launchURL = lib.mkOption {
-            type = lib.types.str;
-            default = "";
-            example = "https://sonarr.cignl.cc";
-            description = "Launch URL for the application (shown in Pocket-ID).";
-          };
+              launchURL = lib.mkOption {
+                type = lib.types.str;
+                default = "";
+                example = "https://sonarr.example.com";
+                description = "Launch URL for the application (shown in Pocket-ID).";
+              };
 
-          customClaims = lib.mkOption {
-            type = lib.types.attrsOf lib.types.str;
-            default = { };
-            example = { "immich_role" = "user"; };
-            description = ''
-              Custom OIDC claims to include in tokens for users of this client.
-              A user group (named <id>-users) is auto-created and linked to the client.
-            '';
-          };
-        };
-      });
+              secretFile = lib.mkOption {
+                type = lib.types.nullOr lib.types.path;
+                default = null;
+                example = "/run/secrets/grafana/OIDC_CLIENT_SECRET";
+                description = ''
+                  File holding the client secret (at least 16 printable
+                  characters). The sync makes it the client's only valid
+                  secret, so the service using the client can read the same
+                  file. When null, a secret is generated once at creation and
+                  printed to the sync unit's journal.
+                '';
+              };
+
+              customClaims = lib.mkOption {
+                type = lib.types.attrsOf lib.types.str;
+                default = { };
+                example = {
+                  immich_role = "user";
+                };
+                description = ''
+                  Custom OIDC claims to include in tokens for users of this client.
+                  A user group (named <id>-users) is auto-created, gets these
+                  claims, and the client is restricted to it.
+                '';
+              };
+            };
+          }
+        )
+      );
     };
 
     appConfig = lib.mkOption {
@@ -331,22 +190,61 @@ in
         Pocket-ID API (PUT /api/application-configuration).
         Only specified keys are enforced; existing values for other keys
         are preserved.
-        Useful for SMTP, email settings, and other app-wide config.
       '';
     };
   };
 
   config = lib.mkIf cfg.enable {
-    systemd.services.pocket-id = lib.mkIf config.services.pocket-id.enable {
-      postStart = lib.mkAfter ''
-        ${lib.getExe syncScript} || echo "pocket-id-declarative: sync failed (non-fatal)" >&2
-      '';
-    };
+    assertions = [
+      {
+        assertion = pocketId.enable;
+        message = "services.pocket-id-auth needs services.pocket-id.enable = true.";
+      }
+      {
+        assertion = lib.all (c: !(c.isPublic && c.secretFile != null)) (lib.attrValues cfg.clients);
+        message = "services.pocket-id-auth: a public client cannot have a secretFile.";
+      }
+      {
+        assertion = cfg.staticApiKeyFile != null;
+        message = ''
+          services.pocket-id-auth needs Pocket-ID's STATIC_API_KEY: set
+          services.pocket-id.credentials.STATIC_API_KEY (preferred) or
+          services.pocket-id-auth.staticApiKeyFile.
+        '';
+      }
+    ];
 
-    system.activationScripts.pocket-id-declarative = lib.mkIf config.services.pocket-id.enable ''
-      if systemctl is-active --quiet pocket-id.service 2>/dev/null; then
-        ${lib.getExe syncScript}
-      fi
-    '';
+    systemd.services.pocket-id-declarative-sync = {
+      description = "Sync declared OIDC clients into Pocket-ID";
+      # Runs after every Pocket-ID start (wantedBy + partOf) and, as its unit
+      # changes with the declared config, on every switch that changes it.
+      wantedBy = [ "pocket-id.service" ];
+      partOf = [ "pocket-id.service" ];
+      requires = [ "pocket-id.service" ];
+      after = [ "pocket-id.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${lib.getExe pkgs.python3} ${./sync.py} ${syncConfig}";
+        LoadCredential = [
+          "api-key:${cfg.staticApiKeyFile}"
+        ]
+        ++ lib.mapAttrsToList (_: c: "client-${c.id}:${c.secretFile}") (
+          lib.filterAttrs (_: c: c.secretFile != null) cfg.clients
+        );
+        # Which declared secret is installed under which secret id.
+        StateDirectory = "pocket-id-declarative";
+        DynamicUser = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        NoNewPrivileges = true;
+        RestrictAddressFamilies = [
+          "AF_INET"
+          "AF_INET6"
+          "AF_UNIX"
+        ];
+      };
+    };
   };
 }

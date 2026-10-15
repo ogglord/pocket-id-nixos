@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Weekly against the current nixpkgs branches, so a Pocket-ID or NixOS
+  # change that breaks the module shows up before users hit it.
+  schedule:
+    - cron: "17 5 * * 1"
+
+jobs:
+  check:
+    name: VM test (${{ matrix.nixpkgs }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        nixpkgs: [locked, nixos-unstable, nixos-26.05]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: nix flake check
+        run: |
+          if [ "${{ matrix.nixpkgs }}" = locked ]; then
+            nix flake check -L
+          else
+            nix flake check -L --override-input nixpkgs "github:NixOS/nixpkgs/${{ matrix.nixpkgs }}"
+          fi
+
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - run: nix fmt -- --ci

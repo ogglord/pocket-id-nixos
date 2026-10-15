@@ -15,91 +15,70 @@ Pocket-ID's Web UI is fine for one-off setup, but when you have many services (S
 ```nix
 # flake.nix
 inputs = {
-  pocket-id-auth.url = "github:ogglord/pocket-id-auth";
+  pocket-id-nixos.url = "github:ogglord/pocket-id-nixos";
+  pocket-id-nixos.inputs.nixpkgs.follows = "nixpkgs"; # only used by this repo's tests
 };
 ```
 
-### 2. Import the module
+### 2. Import the module and declare clients
 
 ```nix
-# configuration.nix
-imports = [
-  inputs.pocket-id-auth.nixosModules.default
-];
+{ inputs, ... }:
+{
+  imports = [ inputs.pocket-id-nixos.nixosModules.default ];
+
+  services.pocket-id = {
+    enable = true;
+    settings.APP_URL = "https://auth.example.com";
+    credentials = {
+      ENCRYPTION_KEY = "/run/secrets/pocket-id/ENCRYPTION_KEY";
+      # The API key the sync authenticates with; the module picks it up from here.
+      STATIC_API_KEY = "/run/secrets/pocket-id/STATIC_API_KEY";
+    };
+  };
+
+  services.pocket-id-auth = {
+    enable = true;
+    clients.grafana = {
+      name = "Grafana";
+      redirectUris = [ "https://grafana.example.com/login/generic_oauth" ];
+      # Optional: declare the secret too, and give Grafana the same file.
+      secretFile = "/run/secrets/grafana/OIDC_CLIENT_SECRET";
+    };
+  };
+}
 ```
 
-### 3. Configure the API connection
+`id` defaults to the attribute name. `baseUrl` defaults to Pocket-ID's own
+port on `127.0.0.1`, and `staticApiKeyFile` to
+`services.pocket-id.credentials.STATIC_API_KEY`, so most setups need nothing
+else. Generate the keys with `openssl rand -base64 32`; any secrets manager
+(sops-nix, agenix, …) that produces a file works.
 
-```nix
-services.pocket-id-auth = {
-  enable = true;
-  baseUrl = "http://127.0.0.1:1411";                          # Pocket-ID internal URL
-  staticApiKeyFile = "/run/secrets/pocket-id/STATIC_API_KEY";  # file containing the API key
-};
-```
+### 3. Deploy
 
-The `STATIC_API_KEY` environment variable must be set in Pocket-ID's environment
-(see [Pocket-ID docs](https://pocket-id.org/docs/guides/oidc-client-authentication)).
-The sync script will read the key from the file path you specify.
+`pocket-id-declarative-sync.service` (a oneshot) runs after every Pocket-ID
+start and again on every switch that changes the declared config. It creates
+missing clients, updates existing ones in place, and applies `appConfig`. A
+failed sync fails the unit (`systemctl status pocket-id-declarative-sync`).
 
-### 4. Declare your OIDC clients
+#### Client secrets
 
-```nix
-services.pocket-id-auth.clients.sonarr = {
-  id = "sonarr";
-  name = "Sonarr";
-  redirectUris = [ "https://sonarr.example.com/oauth/callback" ];
-  # Optional:
-  pkceEnabled = true;
-  launchURL = "https://sonarr.example.com";
-};
-
-services.pocket-id-auth.clients.radarr = {
-  id = "radarr";
-  name = "Radarr";
-  redirectUris = [ "https://radarr.example.com/oauth/callback" ];
-  logoutRedirectUris = [ "https://radarr.example.com/logout" ];
-};
-```
-
-### 5. Deploy
-
-The sync script runs automatically on every `nixos-rebuild switch` via `postStart`
-on the Pocket-ID service. When you add a **new** client, the sync script generates
-a client secret and prints it prominently in the deploy output:
-
-```
-pocket-id-declarative: Syncing OIDC clients...
-  client: sonarr (Sonarr)
-    => creating
-    => generating secret
-
-============================================================
-  NEW CLIENT: sonarr
-  Client ID:     sonarr
-  Client Secret: yE86uAXABJOIFZZY3OTl7rtoMUezPjvy
-  Issuer URL:    http://127.0.0.1:1411/.well-known/openid-configuration
-============================================================
-```
-
-Capture this secret and store it in your secrets management (e.g. sops-nix, agenix,
-or a password manager). The secret is only shown once at creation time. If you need
-to rotate a secret later, call:
-
-```bash
-curl -X POST http://127.0.0.1:1411/api/oidc/clients/<client-id>/secret \
-  -H "X-API-Key: $(cat /run/secrets/pocket-id/STATIC_API_KEY)"
-```
-
-Existing clients are updated in-place without regenerating their secrets.
+- **With `secretFile`** the declared secret becomes the client's only valid
+  secret: it is installed when it changes and every other secret of that
+  client is revoked. Rotating means changing the file.
+- **Without it**, Pocket-ID generates a secret when the client is created and
+  the sync prints it once to its journal
+  (`journalctl -u pocket-id-declarative-sync`). Store it somewhere; it is not
+  shown again. Existing clients keep their secrets.
 
 ## Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enable` | bool | `false` | Enable declarative OIDC client sync |
-| `baseUrl` | string | `"http://127.0.0.1:1411"` | Pocket-ID internal base URL |
-| `staticApiKeyFile` | path | — | File containing the STATIC_API_KEY |
+| `baseUrl` | string | `http://127.0.0.1:<services.pocket-id.settings.PORT or 1411>` | Pocket-ID base URL the sync talks to |
+| `staticApiKeyFile` | path or null | `services.pocket-id.credentials.STATIC_API_KEY` | File containing the STATIC_API_KEY |
 | `prune` | bool | `false` | Delete clients not declared in the config |
 | `clients.*` | submodule | — | OIDC client definitions |
 | `appConfig` | attrs of string | `{}` | App config values applied via API (SMTP, email, etc.) |
@@ -108,7 +87,7 @@ Existing clients are updated in-place without regenerating their secrets.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `id` | string | — | OIDC client ID (kebab-case, used as the API identifier) |
+| `id` | string | attribute name | OIDC client ID (kebab-case, used as the API identifier) |
 | `name` | string | — | Human-readable display name |
 | `redirectUris` | list of string | `[]` | OIDC callback/redirect URIs |
 | `logoutRedirectUris` | list of string | `[]` | Post-logout redirect URIs |
@@ -117,6 +96,7 @@ Existing clients are updated in-place without regenerating their secrets.
 | `requiresReauthentication` | bool | `false` | Re-authenticate on every use |
 | `requiresPushedAuthorizationRequests` | bool | `false` | Require PAR |
 | `launchURL` | string | `""` | Launch URL shown in Pocket-ID |
+| `secretFile` | path or null | `null` | Declared client secret (≥ 16 printable characters); null = generated once |
 | `customClaims` | attrs of string | `{}` | Custom OIDC claims for users of this client |
 
 ## Custom Claims
@@ -174,14 +154,23 @@ for all available keys (SMTP, LDAP, email, UI config, etc.).
 
 ## How it works
 
-On every deploy (and Pocket-ID restart), a Python script runs that:
+`sync.py` runs as `pocket-id-declarative-sync.service` (DynamicUser, the API
+key passed with `LoadCredential`). It:
 
-1. Fetches the list of existing OIDC clients from Pocket-ID's API
-2. For each declared client: creates it if missing, updates it if present
+1. Fetches the existing OIDC clients and user groups from Pocket-ID's API
+2. For each declared client: creates it if missing, updates it if present,
+   and installs its declared secret if that changed
 3. If the client has `customClaims`: creates a user group, sets the claims,
    and links the group to the client (group-restricted)
 4. If `prune` is enabled: deletes any undeclared clients
-5. For newly created clients: generates a client secret and prints it
+5. Applies `appConfig`
 
-The script communicates with Pocket-ID via the `STATIC_API_KEY` on `127.0.0.1`.
-No external dependencies or services required.
+It talks to Pocket-ID over `baseUrl` with the `STATIC_API_KEY`; nothing else
+is needed.
+
+## Development
+
+`nix flake check` runs a NixOS VM test (`test.nix`) against a real Pocket-ID:
+clients, custom claims, declared secrets, app config, a config change on
+switch, and a re-sync on restart. CI runs it on every push and weekly against
+the current `nixos-unstable` and stable branches. `nix fmt` formats.
